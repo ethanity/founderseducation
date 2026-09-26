@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CRO Match</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#14181f;--mute:#5d6673;--line:#e2e6ec;--acc:#2450d6;--acc-ink:#fff;--good:#0f7b4b;--warn:#a86400;--bad:#b4341f;--chip:#eef1f6}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1218;--card:#181c25;--ink:#e8ebf0;--mute:#98a1b0;--line:#2a303c;--acc:#6c8cff;--acc-ink:#0b1020;--good:#4cc38a;--warn:#e2a13b;--bad:#ef7b67;--chip:#232936}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,Segoe UI,sans-serif}
+header{padding:20px 24px 0;max-width:1100px;margin:auto}h1{font-size:20px;margin:0}header p{color:var(--mute);margin:2px 0 14px}
+nav{display:flex;gap:6px;flex-wrap:wrap;padding-bottom:14px;border-bottom:1px solid var(--line)}
+nav button{background:var(--chip);color:var(--ink);border:0;padding:7px 12px;border-radius:999px;cursor:pointer;font:inherit}
+nav button.on{background:var(--acc);color:var(--acc-ink)}nav button:disabled{opacity:.45;cursor:default}
+main{max-width:1100px;margin:auto;padding:18px 24px 60px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px}
+h2{font-size:16px;margin:0 0 8px}h3{font-size:14px;margin:12px 0 4px}
+textarea,input,select{width:100%;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px}
+textarea{min-height:110px;resize:vertical}
+button.p{background:var(--acc);color:var(--acc-ink);border:0;padding:9px 16px;border-radius:8px;font:inherit;cursor:pointer}
+button.s{background:var(--chip);color:var(--ink);border:0;padding:7px 12px;border-radius:8px;font:inherit;cursor:pointer}
+button:disabled{opacity:.5}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+label{font-size:12px;color:var(--mute);display:block;margin-bottom:2px}
+.mute{color:var(--mute)}.small{font-size:13px}
+.chip{display:inline-block;background:var(--chip);border-radius:999px;padding:2px 9px;font-size:12px;margin:2px 4px 2px 0}
+.good{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}th{font-size:12px;color:var(--mute);font-weight:600}
+.bar{height:8px;border-radius:4px;background:var(--chip);overflow:hidden;width:110px;display:inline-block;vertical-align:middle}.bar i{display:block;height:100%;background:var(--acc)}
+details summary{cursor:pointer;color:var(--acc)}pre{white-space:pre-wrap;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;font:13px/1.45 ui-monospace,Consolas,monospace}
+a{color:var(--acc)}.hide{display:none}.best{outline:2px solid var(--good)}
+.note{background:var(--chip);border-radius:8px;padding:8px 10px;font-size:13px;color:var(--mute)}
+</style>
+</head>
+<body>
+<header>
+  <h1>CRO Match</h1>
+  <p>Describe an experiment. See which CROs have actually done it. Get comparable quotes. Track how they perform.</p>
+  <nav id="nav"></nav>
+</header>
+<main id="main"></main>
+
+<script>
+const $ = s => document.querySelector(s);
+const S = {spec:null, match:null, design:null, picks:new Set(), rfqs:[], quotes:{}, step:0, llm:false};
+const STEPS = ["1 · Describe","2 · Evidence","3 · Design","4 · RFQ & quotes","5 · Track"];
+const EX = "We're a 12-person biotech with a small-molecule anti-fibrotic. We want to test it in a bleomycin mouse model of lung fibrosis: 4 groups (vehicle, 2 doses, positive control), 10 mice per group, 4 weeks. Endpoints: Ashcroft score, lung hydroxyproline, BAL cell counts. Budget around $70k.";
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const usd = n => n == null ? "n/a" : "$" + Math.round(n).toLocaleString();
+const api = async (p, body) => { const r = await fetch(p, body ? {method:"POST", body:JSON.stringify(body)} : undefined); const j = await r.json(); if (j.error) throw new Error(j.error); return j; };
+const busy = (btn, on, txt) => { btn.disabled = on; if (txt) btn.dataset.t = on ? btn.textContent : btn.dataset.t, btn.textContent = on ? txt : btn.dataset.t; };
+
+function nav(){
+  $("#nav").innerHTML = STEPS.map((t,i)=>`<button class="${i===S.step?'on':''}" ${i>0&&!S.spec&&i<4?'disabled':''} onclick="go(${i})">${t}</button>`).join("");
+}
+function go(i){ S.step=i; nav(); [step1,step2,step3,step4,step5][i](); }
+
+/* ---- 1 ---- */
+function step1(){
+  const sp = S.spec;
+  $("#main").innerHTML = `
+  <div class="card"><h2>Describe your experiment</h2>
+    <textarea id="txt" placeholder="Model, endpoints, timeline, budget...">${esc(S.text||"")}</textarea>
+    <div class="row" style="margin-top:10px"><button class="p" id="go1">Structure it</button><button class="s" onclick="$('#txt').value=EX">Use example</button>
+    <span class="small mute" id="mode"></span></div></div>
+  <div id="specbox">${sp?specForm():""}</div>`;
+  fetch("/api/status").then(r=>r.json()).then(j=>{S.llm=j.llm;$("#mode").textContent=j.llm?"LLM parsing on":"Keyword parsing (set ANTHROPIC_API_KEY for LLM parsing)"});
+  $("#go1").onclick = async e => { S.text=$("#txt").value; busy(e.target,true,"Working..."); try{ S.spec=await api("/api/spec",{text:S.text}); S.match=null; $("#specbox").innerHTML=specForm(); nav(); }catch(x){alert(x.message)} busy(e.target,false); };
+}
+function specForm(){
+  const s=S.spec;
+  return `<div class="card"><h2>Structured spec <span class="small mute">(edit anything, then continue) · parsed by ${s.source}</span></h2>
+  <div class="grid">
+   ${f("model","Model",s.model)}${f("species","Species",s.species)}${f("indication","Indication",s.indication)}${f("area","Area",s.area)}
+   ${f("groups","Groups",s.groups,"number")}${f("n_per_group","Animals / group",s.n_per_group,"number")}${f("duration_weeks","Weeks",s.duration_weeks,"number")}${f("budget_usd","Budget (USD)",s.budget_usd??"","number")}
+  </div>
+  <div style="margin-top:10px"><label>Literature search terms (comma-separated; how the model is induced)</label><input id="f_search_terms" value="${esc((s.search_terms||[]).join(", "))}"></div>
+  <div style="margin-top:10px"><label>Endpoints (comma-separated)</label><input id="f_endpoints" value="${esc((s.endpoints||[]).join(", "))}"></div>
+  <div class="row" style="margin-top:12px"><button class="p" onclick="commitSpec();runMatch()">Find CROs with evidence →</button></div></div>`;
+}
+const f=(k,l,v,t="text")=>`<div><label>${l}</label><input id="f_${k}" type="${t}" value="${esc(v)}"></div>`;
+function commitSpec(){
+  const s=S.spec, g=k=>$("#f_"+k).value;
+  ["model","species","indication","area"].forEach(k=>s[k]=g(k));
+  ["groups","n_per_group","duration_weeks"].forEach(k=>s[k]=+g(k)||s[k]);
+  s.budget_usd=+g("budget_usd")||null;
+  s.search_terms=g("search_terms").split(",").map(x=>x.trim()).filter(Boolean);
+  s.endpoints=g("endpoints").split(",").map(x=>x.trim()).filter(Boolean);
+}
+
+/* ---- 2 ---- */
+async function runMatch(){
+  S.step=1; nav();
+  $("#main").innerHTML = `<div class="card"><h2>Mining Europe PMC full text...</h2><p class="mute">Searching ~12 CROs for methods/acknowledgment statements like "performed by X" alongside your model. Takes ~10-20 seconds.</p></div>`;
+  try{ const r=await api("/api/match",{spec:S.spec}); S.match=r.results; S.design=r.design; S.picks=new Set(r.results.slice(0,3).map(x=>x.cro.id)); step2(); }
+  catch(e){ $("#main").innerHTML=`<div class="card bad">${esc(e.message)}</div>`; }
+}
+function step2(){
+  if(!S.match) return runMatch();
+  const rows=S.match.map(r=>{
+    const ev=r.evidence, cls=r.claim==="evidence-backed"?"good":r.claim==="advertised only"?"warn":"bad";
+    return `<tr><td><input type="checkbox" style="width:auto" ${S.picks.has(r.cro.id)?"checked":""} onchange="pick('${r.cro.id}',this.checked)"></td>
+     <td><b>${esc(r.cro.name)}</b><div class="small ${cls}">${r.claim}</div></td>
+     <td><span class="bar"><i style="width:${r.score}%"></i></span> ${r.score}</td>
+     <td class="small">${r.why.map(esc).join("<br>")}
+       ${ev.papers.length?`<details><summary>${ev.papers.length} most recent papers</summary>${ev.papers.map(p=>`<div style="margin:6px 0">${esc(p.title)}<br><span class="mute">${esc(p.journal)}, ${p.year||"?"} · ${p.pmcid?`<a target="_blank" href="https://europepmc.org/article/PMC/${p.pmcid}">Europe PMC</a>`:`<a target="_blank" href="https://pubmed.ncbi.nlm.nih.gov/${p.pmid}">PubMed</a>`}</span></div>`).join("")}</details>`:""}
+     </td></tr>`}).join("");
+  $("#main").innerHTML=`<div class="card"><h2>Who has actually done this?</h2>
+   <p class="small mute">Ranking = published record for this model (50) + broader indication record (15) + recent activity (10) + advertised fit (10) + private performance data from tracked projects (15). Paper counts come from live full-text search; open the papers to verify, since a phrase match is evidence to check, not proof.</p>
+   <table><tr><th></th><th>CRO</th><th>Score</th><th>Why</th></tr>${rows}</table>
+   <div class="row" style="margin-top:12px"><button class="p" onclick="go(2)">See study design insights →</button><span class="mute small">${S.picks.size} selected for RFQ</span></div></div>`;
+}
+function pick(id,on){ on?S.picks.add(id):S.picks.delete(id); }
+
+/* ---- 3 ---- */
+function step3(){
+  if(!S.design) return go(1);
+  const d=S.design, s=S.spec;
+  $("#main").innerHTML=`<div class="card"><h2>What the literature says about designing this study</h2>
+   <p class="small mute">Mined from abstracts of ${d.papers_scanned} highly cited papers using this model (of ${d.total_matching??0} matching).</p>
+   <div class="grid">
+    <div class="card"><label>Typical group size</label><b>${d.group_size?`n=${d.group_size.median}`:"not found"}</b><div class="small mute">${d.group_size?`range ${d.group_size.range.join("-")}, ${d.group_size.mentions} mentions. You planned ${s.n_per_group}.`:""}</div></div>
+    <div class="card"><label>Typical duration</label><b>${d.duration_weeks?`~${d.duration_weeks.median} weeks`:"not found"}</b><div class="small mute">You planned ${s.duration_weeks} weeks</div></div>
+    <div class="card"><label>Common dosing/readout days</label><b>${(d.common_days||[]).join(", ")||"n/a"}</b></div>
+   </div>
+   <h3>Common failure points to put in the RFQ</h3><ul>${d.watchouts.map(w=>`<li>${esc(w)}</li>`).join("")}</ul>
+   <p class="note">Watch-outs are a curated starter list per model. With an LLM key, the natural next step is summarizing full-text methods sections per paper.</p>
+   <button class="p" onclick="go(3)">Generate RFQs →</button></div>`;
+}
+
+/* ---- 4 ---- */
+async function step4(){
+  if(!S.picks.size){ $("#main").innerHTML=`<div class="card">Select at least one CRO in step 2.</div>`; return; }
+  const evidence=Object.fromEntries(S.match.map(r=>[r.cro.id,r.evidence]));
+  if(!S.rfqs.length || S.rfqsKey!==[...S.picks].join()){
+    const r=await api("/api/rfq",{spec:S.spec,cro_ids:[...S.picks],evidence}); S.rfqs=r.rfqs; S.rfqsKey=[...S.picks].join();
+    S.quotes={}; r.rfqs.forEach(x=>S.quotes[x.cro_id]=null);
+  }
+  render4();
+}
+const name=id=>S.match.find(r=>r.cro.id===id).cro.name;
+function render4(){
+  const q=S.quotes, have=Object.entries(q).filter(([,v])=>v&&v.total);
+  const best=have.length?have.reduce((a,b)=>score(a[1])<score(b[1])?a:b)[0]:null;
+  const nAnimals=S.spec.groups*S.spec.n_per_group;
+  $("#main").innerHTML=`
+  <div class="card"><h2>Standardized RFQs</h2>
+   ${S.rfqs.map(r=>`<details><summary>${esc(name(r.cro_id))}</summary><pre>${esc(r.text)}</pre>
+     <button class="s" onclick="navigator.clipboard.writeText(S.rfqs.find(x=>x.cro_id==='${r.cro_id}').text)">Copy</button></details>`).join("")}
+   <p class="note" style="margin-top:10px">MVP stops at generating the email; sending is manual. Paste each reply below, or simulate replies to see the comparison view.</p>
+   <button class="s" onclick="simulate()">Simulate CRO replies (demo)</button></div>
+  <div class="card"><h2>Paste a real quote</h2>
+   <div class="row"><select id="qcro" style="max-width:260px">${S.rfqs.map(r=>`<option value="${r.cro_id}">${esc(name(r.cro_id))}</option>`).join("")}</select></div>
+   <textarea id="qtext" style="margin-top:8px;min-height:80px" placeholder="Paste the CRO's reply. We'll pull out price, timeline and deliverables."></textarea>
+   <button class="s" style="margin-top:8px" onclick="parseQ()">Normalize</button></div>
+  <div class="card"><h2>Comparable quotes (${nAnimals} animals)</h2>
+   ${have.length?`<table><tr><th>CRO</th><th>Total</th><th>$/animal</th><th>Weeks to data</th><th>Deliverables</th><th>Evidence</th><th></th></tr>
+   ${have.map(([id,v])=>{const r=S.match.find(x=>x.cro.id===id);return `<tr class="${id===best?'best':''}"><td><b>${esc(name(id))}</b>${v.simulated?'<div class="small mute">simulated</div>':""}${v.parsed_by?`<div class="small mute">parsed: ${v.parsed_by}</div>`:""}</td>
+     <td>${usd(v.total)}${S.spec.budget_usd&&v.total>S.spec.budget_usd?'<div class="small bad">over budget</div>':""}</td>
+     <td>${usd(v.per_animal)}</td><td>${v.weeks??"n/a"}</td><td class="small">${esc(v.deliverables)}</td>
+     <td class="small">${r.evidence.model_hits} papers<br>score ${r.score}</td>
+     <td><button class="p" onclick="award('${id}')">Award</button></td></tr>`}).join("")}</table>
+   <p class="small mute">Highlighted = best blend of price, speed and evidence (weights: price 40%, time 20%, evidence score 40%).</p>`:`<p class="mute">No quotes yet.</p>`}</div>`;
+}
+const score=v=>{ const t=Object.values(S.quotes).filter(x=>x&&x.total); const mx=Math.max(...t.map(x=>x.total)), mw=Math.max(...t.map(x=>x.weeks||1));
+  const ev=S.match.find(r=>S.quotes[r.cro.id]===v); return .4*(v.total/mx)+.2*((v.weeks||mw)/mw)+.4*(1-(ev?ev.score:0)/100); };
+function simulate(){ S.rfqs.forEach(r=>S.quotes[r.cro_id]=r.simulated_quote); render4(); }
+async function parseQ(){ const t=$("#qtext").value; if(!t.trim()) return; const v=await api("/api/quote/parse",{text:t,spec:S.spec}); S.quotes[$("#qcro").value]=v; render4(); }
+async function award(id){
+  const p=await api("/api/projects",{cro_id:id,spec:S.spec,quote:{total:S.quotes[id].total,weeks:S.quotes[id].weeks||8}});
+  go(4);
+}
+
+/* ---- 5 ---- */
+async function step5(){
+  const {projects,performance,names}=await api("/api/projects");
+  const active=projects.filter(p=>!p.demo_seed);
+  const cn=id=>names[id]||id;
+  $("#main").innerHTML=`
+  <div class="card"><h2>Your projects</h2>
+   ${active.length?active.slice().reverse().map(p=>`<div class="card"><b>${esc(p.spec.model)}</b> · ${esc(cn(p.cro_id))} · ${usd(p.quote.total)} · quoted ${p.quote.weeks} wks <span class="chip">${p.status}</span>
+     <div style="margin-top:8px">${p.milestones.map((m,i)=>`<label style="display:inline-flex;gap:6px;align-items:center;margin-right:14px;color:var(--ink);font-size:13px"><input type="checkbox" style="width:auto" ${m.done?"checked":""} onchange="ms('${p.id}',${i},this.checked)"> ${m.name} <span class="mute">${m.done?m.date:"due "+m.due}</span></label>`).join("")}</div>
+     ${p.status==="active"?`<details style="margin-top:8px"><summary>Close out & record outcome</summary>
+       <div class="grid" style="margin-top:8px"><div><label>Actual weeks</label><input id="aw${p.id}" type="number" value="${p.quote.weeks}"></div><div><label>Actual price (USD)</label><input id="ap${p.id}" type="number" value="${p.quote.total}"></div>
+       <div><label>Data quality (1-5)</label><input id="dq${p.id}" type="number" min="1" max="5" value="4"></div><div><label>Use again?</label><select id="ru${p.id}"><option value="1">Yes</option><option value="0">No</option></select></div></div>
+       <button class="p" style="margin-top:8px" onclick="fb('${p.id}')">Save outcome</button></details>`:`<div class="small mute" style="margin-top:6px">Outcome: ${p.feedback.actual_weeks} wks, ${usd(p.feedback.actual_price)}, quality ${p.feedback.data_quality}/5, reuse ${p.feedback.would_reuse?"yes":"no"}</div>`}
+   </div>`).join(""):`<p class="mute">No projects yet. Award a quote in step 4.</p>`}</div>
+  <div class="card"><h2>The moat: private performance data</h2>
+   <p class="small mute">Every closed project feeds the ranking in step 2. Rows marked sample are seeded demo data, not real outcomes.</p>
+   <table><tr><th>CRO</th><th>Projects</th><th>On time</th><th>Quality</th><th>Price vs quote</th><th>Reuse</th></tr>
+   ${Object.entries(performance).map(([id,s])=>`<tr><td>${esc(cn(id))}</td><td>${s.n}${s.sample?` <span class="chip">${s.sample} sample</span>`:""}</td><td>${(s.on_time_rate*100).toFixed(0)}%</td><td>${s.avg_quality.toFixed(1)}/5</td><td class="${s.avg_price_var>.05?'bad':''}">${s.avg_price_var>=0?"+":""}${(s.avg_price_var*100).toFixed(0)}%</td><td>${(s.reuse_rate*100).toFixed(0)}%</td></tr>`).join("")}</table>
+   <button class="s" style="margin-top:8px" onclick="api('/api/reset',{}).then(step5)">Reset sample data</button></div>`;
+}
+async function ms(id,i,done){ await api("/api/projects/milestone",{id,index:i,done}); step5(); }
+async function fb(id){ const v=k=>$("#"+k+id).value;
+  await api("/api/projects/feedback",{id,actual_weeks:+v("aw"),actual_price:+v("ap"),data_quality:+v("dq"),would_reuse:v("ru")==="1"}); S.match=null; step5(); }
+
+go(0);
+</script>
+</body>
+</html>
